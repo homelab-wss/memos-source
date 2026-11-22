@@ -16,6 +16,7 @@ import (
 	"google.golang.org/protobuf/types/known/emptypb"
 
 	"github.com/usememos/memos/core/access"
+	"github.com/usememos/memos/internal/heic"
 	"github.com/usememos/memos/internal/motionphoto"
 	"github.com/usememos/memos/internal/ratelimit"
 	apipb "github.com/usememos/memos/proto/gen/api"
@@ -68,6 +69,16 @@ func detectAttachmentMimeType(filename string, content []byte) string {
 		return mimeType
 	}
 	return http.DetectContentType(content)
+}
+
+// replaceImageExtension swaps a filename's extension after the image has been
+// re-encoded, so a converted HEIC download is not named .heic.
+func replaceImageExtension(filename, extension string) string {
+	stem := strings.TrimSuffix(filename, filepath.Ext(filename))
+	if stem == "" {
+		return filename
+	}
+	return stem + extension
 }
 
 func (s *APIService) prepareAttachment(ctx context.Context, request *apipb.CreateAttachmentRequest) (*store.Attachment, error) {
@@ -244,6 +255,12 @@ func (s *APIService) processAndStoreContent(ctx context.Context, create *store.A
 		} else {
 			content = bytes.NewReader(stripped)
 			create.Size = int64(len(stripped))
+			// HEIC/HEIF are re-encoded as JPEG. Record that in the row so the
+			// served Content-Type matches the bytes browsers actually receive.
+			if heic.IsMIME(create.Type) {
+				create.Type = "image/jpeg"
+				create.Filename = replaceImageExtension(create.Filename, ".jpg")
+			}
 		}
 	}
 

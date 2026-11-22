@@ -24,7 +24,7 @@ vi.mock("@/components/MemoEditor/edit/services/mediaMetadataService", () => ({
 import { toLocalFiles } from "@/components/MemoEditor/edit/hooks/useFileUpload";
 import { uploadService } from "@/components/MemoEditor/edit/services/uploadService";
 
-const createBlobUrl = (file: File) => `blob:${file.name}`;
+const createBlobUrl = (blob: Blob | File) => `blob:${blob instanceof File ? blob.name : "preview"}`;
 
 const localImage = (mediaMetadata?: LocalFile["mediaMetadata"]): LocalFile => ({
   file: new File(["image"], "photo.png", { type: "image/png" }),

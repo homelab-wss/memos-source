@@ -8,6 +8,37 @@ export const getAttachmentUrl = (attachment: Attachment) => {
   return `${window.location.origin}/file/${attachment.name}/${encodeURIComponent(attachment.filename)}`;
 };
 
+/** HEIC/HEIF images are unreadable by most browsers and are served as JPEG for display. */
+export const isHEICImage = (mimeType: string): boolean => {
+  const normalized = mimeType.toLowerCase();
+  return normalized === "image/heic" || normalized === "image/heif";
+};
+
+/**
+ * The URL an image element should load. HEIC/HEIF attachments need a
+ * server-side conversion; ask for it explicitly while the stored original
+ * stays at getAttachmentUrl(), which downloads and other consumers keep using.
+ */
+export const getAttachmentDisplayUrl = (attachment: Attachment): string => {
+  const url = getAttachmentUrl(attachment);
+  if (!isHEICImage(attachment.type)) {
+    return url;
+  }
+
+  let parsed: URL;
+  try {
+    parsed = new URL(url, window.location.origin);
+  } catch {
+    return url;
+  }
+  // External attachments live on another origin, which has no conversion.
+  if (parsed.origin !== window.location.origin) {
+    return url;
+  }
+  parsed.searchParams.set("format", "jpeg");
+  return parsed.toString();
+};
+
 /**
  * Downloads an attachment's original file (never the thumbnail) with the session's
  * credentials. Rejects when the server refuses it.

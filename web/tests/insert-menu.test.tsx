@@ -87,7 +87,7 @@ describe("InsertMenu", () => {
     const { container } = renderMenu(onInsertImages);
     const inputs = Array.from(container.querySelectorAll<HTMLInputElement>('input[type="file"]'));
     const attachmentInput = inputs.find((input) => input.accept === "");
-    const inlineImageInput = inputs.find((input) => input.accept === "image/*");
+    const inlineImageInput = inputs.find((input) => input.accept.startsWith("image/*"));
 
     expect(attachmentInput).toBeDefined();
     expect(attachmentInput).toHaveAttribute("multiple");

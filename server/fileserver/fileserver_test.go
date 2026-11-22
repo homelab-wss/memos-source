@@ -9,6 +9,7 @@ import (
 	"hash/crc32"
 	"image"
 	"image/color"
+	"image/jpeg"
 	"image/png"
 	"net/http"
 	"net/http/httptest"
@@ -1118,6 +1119,77 @@ func createPublicImageMemo(ctx context.Context, t *testing.T, svc *api.APIServic
 	}})
 	require.NoError(t, err)
 	return attachment
+}
+
+// createLegacyHEICAttachment stores a HEIC attachment directly, as an older
+// server version would have, without the upload conversion that now turns
+// HEIC into JPEG.
+func createLegacyHEICAttachment(ctx context.Context, t *testing.T, svc *api.APIService, username string) (*store.Attachment, *store.User, []byte) {
+	t.Helper()
+	creator, err := svc.Store.CreateUser(ctx, &store.User{Username: username, Role: store.RoleUser, Email: username + "@example.com"})
+	require.NoError(t, err)
+	content := testutil.BuildHEIC(64, 64)
+	path := filepath.Join(t.TempDir(), "legacy.heic")
+	require.NoError(t, os.WriteFile(path, content, 0644))
+	attachment, err := svc.Store.CreateAttachment(ctx, &store.Attachment{
+		UID:         "legacyheic",
+		CreatorID:   creator.ID,
+		Filename:    "legacy.heic",
+		Type:        "image/heic",
+		Size:        int64(len(content)),
+		StorageType: storepb.AttachmentStorageType_LOCAL,
+		Reference:   path,
+	})
+	require.NoError(t, err)
+	creatorCtx := context.WithValue(ctx, auth.UserIDContextKey, creator.ID)
+	_, err = svc.CreateMemo(creatorCtx, &apipb.CreateMemoRequest{Memo: &apipb.Memo{
+		Content: "legacy heic memo", Visibility: apipb.Visibility_PUBLIC, Attachments: []*apipb.Attachment{{Name: "attachments/" + attachment.UID}},
+	}})
+	require.NoError(t, err)
+	return attachment, creator, content
+}
+
+// HEIC attachments stored before upload conversion existed still display:
+// thumbnails and ?format=jpeg return a JPEG, while the original stays available.
+func TestServeAttachmentFile_HEICConversion(t *testing.T) {
+	ctx := context.Background()
+	svc, fs, cleanup := newSharedProfileTestServices(ctx, t)
+	defer cleanup()
+
+	attachment, creator, content := createLegacyHEICAttachment(ctx, t, svc, "heic-owner")
+	name := "attachments/" + attachment.UID
+	e := http.NewServeMux()
+	fs.RegisterRoutes(e, http.HandlerFunc(httphandler.NotFound))
+
+	original := httptest.NewRecorder()
+	e.ServeHTTP(original, httptest.NewRequest(http.MethodGet, fmt.Sprintf("/file/%s/%s", name, attachment.Filename), nil))
+	require.Equal(t, http.StatusOK, original.Code)
+	require.Equal(t, "image/heic", original.Header().Get("Content-Type"))
+	require.Equal(t, content, original.Body.Bytes())
+
+	converted := httptest.NewRecorder()
+	e.ServeHTTP(converted, httptest.NewRequest(http.MethodGet, fmt.Sprintf("/file/%s/%s?format=jpeg", name, attachment.Filename), nil))
+	require.Equal(t, http.StatusOK, converted.Code)
+	require.Equal(t, "image/jpeg", converted.Header().Get("Content-Type"))
+	convertedImage, err := jpeg.Decode(bytes.NewReader(converted.Body.Bytes()))
+	require.NoError(t, err)
+	require.Equal(t, 64, convertedImage.Bounds().Dx())
+	require.Equal(t, 64, convertedImage.Bounds().Dy())
+
+	thumbnail := httptest.NewRecorder()
+	e.ServeHTTP(thumbnail, httptest.NewRequest(http.MethodGet, fmt.Sprintf("/file/%s/%s?thumbnail=true", name, attachment.Filename), nil))
+	require.Equal(t, http.StatusOK, thumbnail.Code)
+	require.Equal(t, "image/jpeg", thumbnail.Header().Get("Content-Type"))
+	_, err = jpeg.Decode(bytes.NewReader(thumbnail.Body.Bytes()))
+	require.NoError(t, err)
+
+	convertedPath := filepath.Join(fs.Profile.Data, thumbnailCacheFolder, attachment.UID+convertedJPEGCacheSuffix)
+	require.FileExists(t, convertedPath)
+
+	ownerCtx := context.WithValue(ctx, auth.UserIDContextKey, creator.ID)
+	_, err = svc.DeleteAttachment(ownerCtx, &apipb.DeleteAttachmentRequest{Name: name})
+	require.NoError(t, err)
+	require.NoFileExists(t, convertedPath)
 }
 
 // A small PNG that declares billions of pixels must not be decoded for a

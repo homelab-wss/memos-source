@@ -1,5 +1,6 @@
 import type { Attachment } from "@/types/proto/api/attachment_service_pb";
 import {
+  getAttachmentDisplayUrl,
   getAttachmentMotionClipUrl,
   getAttachmentMotionGroupId,
   getAttachmentThumbnailUrl,
@@ -114,7 +115,7 @@ export function countLogicalAttachmentItems(attachments: Attachment[]): number {
 
 function buildSingleAttachmentItem(attachment: Attachment): AttachmentVisualItem {
   const attachmentType = getAttachmentType(attachment);
-  const sourceUrl = getAttachmentUrl(attachment);
+  const sourceUrl = getAttachmentDisplayUrl(attachment);
   const posterUrl = attachmentType === "image/*" ? getAttachmentThumbnailUrl(attachment) : sourceUrl;
   const previewKind = attachmentType === "video/*" ? "video" : "image";
 

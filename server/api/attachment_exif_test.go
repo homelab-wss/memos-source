@@ -12,6 +12,8 @@ import (
 	"github.com/disintegration/imaging"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/usememos/memos/internal/testutil"
 )
 
 func TestShouldStripExif(t *testing.T) {
@@ -164,14 +166,16 @@ func TestStripImageExif(t *testing.T) {
 	t.Run("handle HEIC format by converting to JPEG", func(t *testing.T) {
 		t.Parallel()
 
-		strippedData, err := stripImageExif(bytes.NewReader(originalData), "image/heic")
+		strippedData, err := stripImageExif(bytes.NewReader(testutil.BuildHEIC(100, 100)), "image/heic")
 		require.NoError(t, err)
 		assert.NotEmpty(t, strippedData)
+		assert.True(t, bytes.HasPrefix(strippedData, []byte{0xff, 0xd8}), "converted image should be a JPEG")
 
 		// Verify it's a valid image
 		decodedImg, err := imaging.Decode(bytes.NewReader(strippedData))
 		require.NoError(t, err)
-		assert.NotNil(t, decodedImg)
+		assert.Equal(t, 100, decodedImg.Bounds().Dx())
+		assert.Equal(t, 100, decodedImg.Bounds().Dy())
 	})
 
 	t.Run("return error for invalid image data", func(t *testing.T) {

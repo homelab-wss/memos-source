@@ -195,7 +195,7 @@ const InsertMenu = (props: InsertMenuProps) => {
         onChange={handleInlineImageInputChange}
         type="file"
         multiple={true}
-        accept="image/*"
+        accept="image/*,.heic,.heif"
       />
 
       <LinkMemoDialog

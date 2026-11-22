@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Attachment } from "@/types/proto/api/attachment_service_pb";
-import { getAttachmentMotionClipUrl, getAttachmentThumbnailUrl, getAttachmentUrl } from "@/utils/attachment";
+import { getAttachmentDisplayUrl, getAttachmentMotionClipUrl, getAttachmentThumbnailUrl, getAttachmentUrl } from "@/utils/attachment";
 
 const origin = window.location.origin;
 
@@ -72,5 +72,44 @@ describe("attachment URL builders in share mode", () => {
     } as Attachment;
 
     expect(getAttachmentUrl(attachment)).toBe(attachment.externalLink);
+  });
+
+  it("asks for a JPEG display form of a share-link HEIC and keeps the share token", () => {
+    const attachment = {
+      ...baseAttachment,
+      type: "image/heic",
+      filename: "ảnh#1?.heic",
+      externalLink: `${origin}/file/attachments/test-uid/photo.heic?share_token=abc123`,
+    } as Attachment;
+
+    const url = new URL(getAttachmentDisplayUrl(attachment));
+    expect(url.searchParams.get("format")).toBe("jpeg");
+    expect(url.searchParams.get("share_token")).toBe("abc123");
+  });
+});
+
+describe("attachment display URLs", () => {
+  it.each(["image/heic", "image/heif", "IMAGE/HEIC"])(`requests the converted JPEG for %s`, (type) => {
+    const attachment = { ...baseAttachment, type, filename: "IMG_0001.HEIC" } as Attachment;
+
+    const url = new URL(getAttachmentDisplayUrl(attachment));
+    expect(url.pathname).toBe(`/file/${attachment.name}/IMG_0001.HEIC`);
+    expect(url.searchParams.get("format")).toBe("jpeg");
+    // The original stays available for downloads.
+    expect(getAttachmentUrl(attachment)).not.toContain("format=");
+  });
+
+  it("leaves other image types on the original URL", () => {
+    expect(getAttachmentDisplayUrl(baseAttachment)).toBe(getAttachmentUrl(baseAttachment));
+  });
+
+  it("does not add a display parameter to an external attachment on another origin", () => {
+    const attachment = {
+      ...baseAttachment,
+      type: "image/heic",
+      externalLink: "https://cdn.example.com/photo.heic",
+    } as Attachment;
+
+    expect(getAttachmentDisplayUrl(attachment)).toBe(attachment.externalLink);
   });
 });

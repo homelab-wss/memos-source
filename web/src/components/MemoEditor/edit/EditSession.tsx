@@ -15,6 +15,7 @@ import { EditorSuggestions } from "./components/EditorSuggestions";
 import { FOCUS_MODE_STYLES } from "./constants";
 import type { EditorFileOrigin } from "./extensions";
 import {
+  prepareLocalFiles,
   splitInlineLocalFiles,
   toLocalFiles,
   useAttachmentTranscription,
@@ -268,9 +269,12 @@ export const EditSession: React.FC<EditSessionProps> = ({
    * otherwise everything joins the attachment list.
    */
   const handleFiles = useCallback(
-    (files: File[], placement: { inline: false } | { inline: true; position?: EditorPosition | null }) => {
+    async (files: File[], placement: { inline: false } | { inline: true; position?: EditorPosition | null }) => {
       if (getState().ui.isLoading.saving) return;
-      const localFiles = toLocalFiles(files, { createBlobUrl, saveMediaMetadata });
+      // HEIC previews are converted before the files reach the editor; a save
+      // that starts meanwhile wins and the files are dropped.
+      const localFiles = await prepareLocalFiles(files, { createBlobUrl, saveMediaMetadata });
+      if (getState().ui.isLoading.saving) return;
       const { inline, attachments } = placement.inline ? splitInlineLocalFiles(localFiles) : { inline: [], attachments: localFiles };
       attachments.forEach((file) => dispatch(actions.addLocalFile(file)));
       if (placement.inline) inlineImageUpload.insertLocalImages(inline, placement.position);

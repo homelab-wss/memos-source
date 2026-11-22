@@ -3,24 +3,53 @@ import { useRef } from "react";
 import { v4 as uuidv4 } from "uuid";
 import { useAuth } from "@/contexts/AuthContext";
 import { type MotionMedia, MotionMediaFamily, MotionMediaRole, MotionMediaSchema } from "@/types/proto/api/attachment_service_pb";
+import { convertHEICToJPEG, isHEICFile, normalizeHEICFile } from "@/utils/heic";
 import { mediaMetadataService } from "../services/mediaMetadataService";
 import type { LocalFile } from "../types/attachment";
 import { useBlobUrls } from "./useBlobUrls";
+
+interface LocalFileOptions {
+  createBlobUrl: (blob: Blob | File) => string;
+  saveMediaMetadata: boolean;
+  /** Preview bytes for files the browser cannot render, keyed by the original file. */
+  previewBlobs?: ReadonlyMap<File, Blob>;
+}
 
 /**
  * Single ingest point turning picked/pasted/dropped Files into LocalFiles.
  * Media metadata extraction starts here (not at upload time) so every upload
  * path inherits the preference from the LocalFile instead of threading it.
  */
-export const toLocalFiles = (files: File[], options: { createBlobUrl: (file: File) => string; saveMediaMetadata: boolean }): LocalFile[] =>
+export const toLocalFiles = (files: File[], options: LocalFileOptions): LocalFile[] =>
   pairAppleLivePhotoFiles(
-    files.map((file) => ({
-      file,
-      previewUrl: options.createBlobUrl(file),
-      origin: "upload",
-      mediaMetadata: options.saveMediaMetadata ? mediaMetadataService.extract(file) : undefined,
-    })),
+    files.map((sourceFile) => {
+      const file = normalizeHEICFile(sourceFile);
+      return {
+        file,
+        previewUrl: options.createBlobUrl(options.previewBlobs?.get(sourceFile) ?? file),
+        origin: "upload" as const,
+        mediaMetadata: options.saveMediaMetadata ? mediaMetadataService.extract(file) : undefined,
+      };
+    }),
   );
+
+/**
+ * Prepares HEIC/HEIF previews, which browsers cannot render, then builds the
+ * LocalFiles. The uploaded file stays the original; only its preview is JPEG.
+ */
+export const prepareLocalFiles = async (files: File[], options: LocalFileOptions): Promise<LocalFile[]> => {
+  const previewBlobs = new Map<File, Blob>();
+  for (const file of files) {
+    if (!isHEICFile(file)) {
+      continue;
+    }
+    const preview = await convertHEICToJPEG(file);
+    if (preview) {
+      previewBlobs.set(file, preview);
+    }
+  }
+  return toLocalFiles(files, { ...options, previewBlobs });
+};
 
 export const useFileUpload = (onFilesSelected: (localFiles: LocalFile[]) => void) => {
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -31,17 +60,20 @@ export const useFileUpload = (onFilesSelected: (localFiles: LocalFile[]) => void
   const { userGeneralSetting } = useAuth();
   const saveMediaMetadata = userGeneralSetting?.saveMediaMetadata ?? false;
 
-  const handleFileInputChange = (event?: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileInputChange = async (event?: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(fileInputRef.current?.files || event?.target.files || []);
     if (files.length === 0 || selectingFlagRef.current) {
       return;
     }
     selectingFlagRef.current = true;
-    const localFiles = toLocalFiles(files, { createBlobUrl, saveMediaMetadata });
-    onFilesSelected(localFiles);
-    selectingFlagRef.current = false;
-    // Optionally clear input value to allow re-selecting the same file
-    if (fileInputRef.current) fileInputRef.current.value = "";
+    try {
+      const localFiles = await prepareLocalFiles(files, { createBlobUrl, saveMediaMetadata });
+      onFilesSelected(localFiles);
+    } finally {
+      selectingFlagRef.current = false;
+      // Optionally clear input value to allow re-selecting the same file
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
   };
 
   const handleUploadClick = (accept = "") => {

@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"image"
 	"io"
 	"net/http"
 
@@ -11,6 +12,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/usememos/memos/internal/heic"
 	"github.com/usememos/memos/internal/imagelimit"
 	apipb "github.com/usememos/memos/proto/gen/api"
 	storepb "github.com/usememos/memos/proto/gen/store"
@@ -84,6 +86,21 @@ func validateImageReaderPixelCount(reader io.Reader) error {
 	return imagelimit.CheckReader(reader)
 }
 
+// validateImageReaderPixelCountForMIME bounds the declared pixel count for the
+// formats whose header the standard image registry cannot size. HEIC/HEIF
+// headers are read by their own decoder; a header it cannot parse is left to
+// the full decode to reject.
+func validateImageReaderPixelCountForMIME(reader io.Reader, mimeType string) error {
+	if heic.IsMIME(mimeType) {
+		config, err := heic.DecodeConfig(reader)
+		if err != nil {
+			return nil //nolint:nilerr // unsupported/corrupt headers defer to the decoder
+		}
+		return imagelimit.CheckDimensions(config.Width, config.Height)
+	}
+	return validateImageReaderPixelCount(reader)
+}
+
 // stripImageExif removes EXIF metadata from image files by decoding and re-encoding them.
 // This prevents exposure of sensitive metadata such as GPS location, camera details, and timestamps.
 //
@@ -102,13 +119,21 @@ func stripImageExif(source io.ReadSeeker, mimeType string) ([]byte, error) {
 	if _, err := source.Seek(0, io.SeekStart); err != nil {
 		return nil, errors.Wrap(err, "failed to rewind image")
 	}
-	if err := validateImageReaderPixelCount(source); err != nil {
+	if err := validateImageReaderPixelCountForMIME(source, mimeType); err != nil {
 		return nil, err
 	}
 	if _, err := source.Seek(0, io.SeekStart); err != nil {
 		return nil, errors.Wrap(err, "failed to rewind image")
 	}
-	img, err := imaging.Decode(source, imaging.AutoOrientation(true))
+	var (
+		img image.Image
+		err error
+	)
+	if heic.IsMIME(mimeType) {
+		img, err = heic.Decode(source)
+	} else {
+		img, err = imaging.Decode(source, imaging.AutoOrientation(true))
+	}
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to decode image")
 	}

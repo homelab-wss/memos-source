@@ -7,6 +7,7 @@ The `fileserver` package serves binary content (attachments, avatars) over plain
 ```text
 GET /file/attachments/:uid[/:filename]   # attachment binary
     ?thumbnail=true                      # JPEG thumbnail for supported image types
+    ?format=jpeg                         # displayable JPEG for HEIC/HEIF attachments
     ?motion=true                         # embedded motion-photo video clip
     ?share_token={uid}                   # access via a memo share link
 GET /file/users/:identifier/avatar       # user avatar (by username)
@@ -38,6 +39,7 @@ the server injects as `MemoExporter`; without it the route answers `404`.
 
 - **Video/audio** are streamed with range-request support (`http.ServeFile` / `http.ServeContent` for local and database storage); S3-backed media is proxied with ranged `GetObject` requests.
 - **Thumbnails** are generated at max 600px, cached in `{data_dir}/.thumbnail_cache/`, with a semaphore capping concurrent generation. Images with HDR/wide-gamut metadata are served as originals, since re-encoding would strip it.
+- **HEIC/HEIF** uploads are converted to JPEG. Attachments stored as HEIC by an older version are served as JPEG when the request asks for `?format=jpeg`; the original bytes stay untouched and are returned without that parameter.
 - **Motion photos** have their embedded video extracted and cached in `{data_dir}/.motion_cache/`.
 - **XSS prevention**: script-capable MIME types are rewritten to `application/octet-stream`, non-media files get `Content-Disposition: attachment`, and all responses carry `X-Content-Type-Options: nosniff` plus a restrictive `Content-Security-Policy`.
 - **Caching**: public attachments get `public, no-cache`; private ones `private, no-store`; avatars and thumbnails `public, max-age=3600`.

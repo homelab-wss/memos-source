@@ -6,6 +6,8 @@ import (
 	"image/color"
 	"image/jpeg"
 	"image/png"
+
+	h265heic "github.com/gen2brain/h265/heic"
 )
 
 func solidImage(width, height int) *image.RGBA {
@@ -33,6 +35,17 @@ func BuildJPEG(width, height int) []byte {
 	img := solidImage(width, height)
 	var buffer bytes.Buffer
 	if err := jpeg.Encode(&buffer, img, &jpeg.Options{Quality: 90}); err != nil {
+		// Encoding an in-memory RGBA image cannot fail with valid dimensions.
+		panic(err)
+	}
+	return buffer.Bytes()
+}
+
+// BuildHEIC returns a solid-color width×height HEIC blob for tests.
+func BuildHEIC(width, height int) []byte {
+	img := solidImage(width, height)
+	var buffer bytes.Buffer
+	if err := h265heic.Encode(&buffer, img, h265heic.EncodeOptions{Quality: 80}); err != nil {
 		// Encoding an in-memory RGBA image cannot fail with valid dimensions.
 		panic(err)
 	}

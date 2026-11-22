@@ -8,7 +8,7 @@ import useMediaQuery from "@/hooks/useMediaQuery";
 import { cn } from "@/lib/utils";
 import type { Attachment } from "@/types/proto/api/attachment_service_pb";
 import type { Memo } from "@/types/proto/api/memo_service_pb";
-import { getAttachmentUrl } from "@/utils/attachment";
+import { getAttachmentDisplayUrl } from "@/utils/attachment";
 import { useTranslate } from "@/utils/i18n";
 import type { PreviewMediaItem } from "@/utils/media-item";
 
@@ -110,7 +110,7 @@ function PreviewImageDialog({ open, onOpenChange, imgUrls = [], items, initialIn
             !attachment.motionMedia &&
             attachment.type.startsWith("image/") &&
             !isDrawingFilename(attachment.filename) &&
-            (attachment.name === currentItem.id || getAttachmentUrl(attachment) === currentItem.sourceUrl),
+            (attachment.name === currentItem.id || getAttachmentDisplayUrl(attachment) === currentItem.sourceUrl),
         )
       : undefined;
   const hasMultiple = itemCount > 1;

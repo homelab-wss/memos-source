@@ -1,6 +1,6 @@
 import { cn } from "@/lib/utils";
 import type { Attachment } from "@/types/proto/api/attachment_service_pb";
-import { getAttachmentThumbnailUrl, getAttachmentType, getAttachmentUrl } from "@/utils/attachment";
+import { getAttachmentDisplayUrl, getAttachmentThumbnailUrl, getAttachmentType } from "@/utils/attachment";
 
 interface AttachmentCardProps {
   attachment: Attachment;
@@ -10,7 +10,7 @@ interface AttachmentCardProps {
 
 const AttachmentCard = ({ attachment, onClick, className }: AttachmentCardProps) => {
   const attachmentType = getAttachmentType(attachment);
-  const sourceUrl = getAttachmentUrl(attachment);
+  const sourceUrl = getAttachmentDisplayUrl(attachment);
 
   if (attachmentType === "image/*") {
     return (

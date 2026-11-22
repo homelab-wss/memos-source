@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"image"
 	"io"
 	"io/fs"
 	"log/slog"
@@ -22,6 +23,7 @@ import (
 	"golang.org/x/sync/semaphore"
 
 	"github.com/usememos/memos/core/access"
+	"github.com/usememos/memos/internal/heic"
 	"github.com/usememos/memos/internal/httphandler"
 	"github.com/usememos/memos/internal/imagelimit"
 	"github.com/usememos/memos/internal/motionphoto"
@@ -52,9 +54,15 @@ const (
 	maxConcurrentThumbnails = 3
 
 	// thumbnailFailedMarkerSuffix names the empty file left next to a
-	// thumbnail that could not be generated, so an image that fails to decode
-	// is not decoded again on every request.
+	// thumbnail or conversion that could not be generated, so an image that
+	// fails to decode is not decoded again on every request.
 	thumbnailFailedMarkerSuffix = ".failed"
+
+	// convertedJPEGCacheSuffix names the full-size JPEG cached for a HEIC/HEIF
+	// attachment requested with ?format=jpeg. Browsers cannot render HEIC, so
+	// existing attachments need a displayable form without changing the stored
+	// original.
+	convertedJPEGCacheSuffix = ".converted.jpeg"
 
 	// cacheMaxAge is the max-age value for Cache-Control headers (1 hour).
 	cacheMaxAge = "public, max-age=3600"
@@ -156,6 +164,7 @@ func (s *FileServerService) serveAttachmentFile(w http.ResponseWriter, r *http.R
 	uid := r.PathValue("uid")
 	wantThumbnail := r.URL.Query().Get("thumbnail") == "true"
 	wantMotion := r.URL.Query().Get("motion") == "true"
+	wantJPEG := isJPEGFormat(r.URL.Query().Get("format"))
 
 	// Authorize on metadata alone. Database-stored bytes are loaded only
 	// after the read is permitted, so an unauthorized request never pulls a
@@ -201,7 +210,7 @@ func (s *FileServerService) serveAttachmentFile(w http.ResponseWriter, r *http.R
 		return s.serveMediaStream(w, r, attachment, contentType)
 	}
 
-	return s.serveStaticFile(w, r, attachment, contentType, wantThumbnail)
+	return s.serveStaticFile(w, r, attachment, contentType, wantThumbnail, wantJPEG)
 }
 
 // serveUserAvatar serves user avatar images.
@@ -294,7 +303,7 @@ func (s *FileServerService) serveMediaStream(w http.ResponseWriter, r *http.Requ
 }
 
 // serveStaticFile serves non-streaming files (images, documents, etc.).
-func (s *FileServerService) serveStaticFile(w http.ResponseWriter, r *http.Request, attachment *store.Attachment, contentType string, wantThumbnail bool) error {
+func (s *FileServerService) serveStaticFile(w http.ResponseWriter, r *http.Request, attachment *store.Attachment, contentType string, wantThumbnail, wantJPEG bool) error {
 	// Generate thumbnail for supported image types.
 	if wantThumbnail && thumbnailSupportedTypes[attachment.Type] {
 		if thumbnailBlob, err := s.getOrGenerateThumbnail(r.Context(), attachment); err != nil {
@@ -305,6 +314,21 @@ func (s *FileServerService) serveStaticFile(w http.ResponseWriter, r *http.Reque
 			setSecurityHeaders(w)
 			setMediaHeaders(w, "image/jpeg", attachment.Type)
 			return httphandler.Blob(w, http.StatusOK, "image/jpeg", thumbnailBlob)
+		}
+	}
+
+	// Browsers cannot render HEIC/HEIF. Serve a cached JPEG for display while
+	// keeping the stored original untouched; ?format=jpeg is explicit so a
+	// client that wants the original still can.
+	if wantJPEG && heic.IsMIME(attachment.Type) {
+		if jpegBlob, err := s.getOrGenerateConvertedJPEG(r.Context(), attachment); err != nil {
+			if !errors.Is(err, errUseOriginalForThumbnail) {
+				slog.Warn("failed to convert HEIC attachment to JPEG", "error", err)
+			}
+		} else {
+			setSecurityHeaders(w)
+			setMediaHeaders(w, "image/jpeg", attachment.Type)
+			return httphandler.Blob(w, http.StatusOK, "image/jpeg", jpegBlob)
 		}
 	}
 
@@ -525,10 +549,6 @@ func (s *FileServerService) getThumbnailPath(attachment *store.Attachment) (stri
 }
 
 func (s *FileServerService) shouldUseOriginalForThumbnail(ctx context.Context, attachment *store.Attachment) (bool, error) {
-	if attachment.Type == "image/heic" || attachment.Type == "image/heif" {
-		return true, nil
-	}
-
 	if attachment.Type != "image/jpeg" && attachment.Type != "image/jpg" && attachment.Type != "image/png" && attachment.Type != "image/webp" {
 		return false, nil
 	}
@@ -602,7 +622,7 @@ func (s *FileServerService) generateThumbnail(ctx context.Context, attachment *s
 	}
 	defer reader.Close()
 
-	img, err := imaging.Decode(reader, imaging.AutoOrientation(true))
+	img, err := decodeImage(reader, attachment.Type)
 	if err != nil {
 		return nil, errors.Wrapf(errThumbnailUnsupported, "failed to decode image: %v", err)
 	}
@@ -623,6 +643,92 @@ func (s *FileServerService) generateThumbnail(ctx context.Context, attachment *s
 	return buf.Bytes(), nil
 }
 
+// getOrGenerateConvertedJPEG returns the cached full-size JPEG for a HEIC/HEIF
+// attachment, generating it on first request. A failed decode leaves a marker
+// so the next request serves the original without decoding again.
+func (s *FileServerService) getOrGenerateConvertedJPEG(ctx context.Context, attachment *store.Attachment) ([]byte, error) {
+	convertedPath, err := s.getConvertedJPEGPath(attachment)
+	if err != nil {
+		return nil, err
+	}
+	if blob, err := os.ReadFile(convertedPath); err == nil {
+		return blob, nil
+	}
+	if _, err := os.Stat(convertedPath + thumbnailFailedMarkerSuffix); err == nil {
+		return nil, errUseOriginalForThumbnail
+	}
+
+	if err := s.thumbnailSemaphore.Acquire(ctx, 1); err != nil {
+		return nil, errors.Wrap(err, "failed to acquire semaphore")
+	}
+	defer s.thumbnailSemaphore.Release(1)
+
+	// Double-check after acquiring the semaphore (another goroutine may have
+	// generated it).
+	if blob, err := os.ReadFile(convertedPath); err == nil {
+		return blob, nil
+	}
+	if _, err := os.Stat(convertedPath + thumbnailFailedMarkerSuffix); err == nil {
+		return nil, errUseOriginalForThumbnail
+	}
+
+	blob, err := s.generateConvertedJPEG(ctx, attachment, convertedPath)
+	if errors.Is(err, errThumbnailUnsupported) && ctx.Err() == nil {
+		if markerErr := os.WriteFile(convertedPath+thumbnailFailedMarkerSuffix, nil, 0644); markerErr != nil {
+			slog.Warn("failed to record HEIC conversion failure", "error", markerErr)
+		}
+	}
+	return blob, err
+}
+
+// getConvertedJPEGPath returns the file path for a cached full-size HEIC/HEIF
+// conversion.
+func (s *FileServerService) getConvertedJPEGPath(attachment *store.Attachment) (string, error) {
+	cacheFolder := filepath.Join(s.Profile.Data, thumbnailCacheFolder)
+	if err := os.MkdirAll(cacheFolder, os.ModePerm); err != nil {
+		return "", errors.Wrap(err, "failed to create thumbnail cache folder")
+	}
+	return filepath.Join(cacheFolder, attachment.UID+convertedJPEGCacheSuffix), nil
+}
+
+// generateConvertedJPEG decodes a HEIC/HEIF attachment and writes a JPEG at
+// its original dimensions.
+func (s *FileServerService) generateConvertedJPEG(ctx context.Context, attachment *store.Attachment, convertedPath string) ([]byte, error) {
+	if err := s.checkThumbnailSourceBounds(ctx, attachment); err != nil {
+		return nil, err
+	}
+
+	reader, err := s.getAttachmentReader(ctx, attachment)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to get attachment reader")
+	}
+	defer reader.Close()
+
+	img, err := decodeImage(reader, attachment.Type)
+	if err != nil {
+		return nil, errors.Wrapf(errThumbnailUnsupported, "failed to decode image: %v", err)
+	}
+
+	var buf bytes.Buffer
+	if err := imaging.Encode(&buf, img, imaging.JPEG, imaging.JPEGQuality(90)); err != nil {
+		return nil, errors.Wrap(err, "failed to encode JPEG")
+	}
+	if err := os.WriteFile(convertedPath, buf.Bytes(), 0644); err != nil {
+		return nil, errors.Wrap(err, "failed to save converted JPEG")
+	}
+	return buf.Bytes(), nil
+}
+
+// decodeImage decodes an attachment for thumbnail or display conversion.
+// HEIC/HEIF use their own decoder because the standard image registry does not
+// know the format; other images keep imaging's EXIF auto-orientation.
+func decodeImage(reader io.Reader, mimeType string) (image.Image, error) {
+	if heic.IsMIME(mimeType) {
+		return heic.Decode(reader)
+	}
+	return imaging.Decode(reader, imaging.AutoOrientation(true))
+}
+
 // checkThumbnailSourceBounds reads the image header and refuses images whose
 // declared dimensions exceed the decode budget.
 func (s *FileServerService) checkThumbnailSourceBounds(ctx context.Context, attachment *store.Attachment) error {
@@ -631,8 +737,19 @@ func (s *FileServerService) checkThumbnailSourceBounds(ctx context.Context, atta
 		return errors.Wrap(err, "failed to open image for size probe")
 	}
 	defer reader.Close()
-	if err := imagelimit.CheckReader(io.LimitReader(reader, thumbnailMetadataProbeSize)); err != nil {
-		return errors.Wrapf(errThumbnailUnsupported, "thumbnail source exceeds decode bounds: %v", err)
+	probe := io.LimitReader(reader, thumbnailMetadataProbeSize)
+	var boundsErr error
+	if heic.IsMIME(attachment.Type) {
+		config, err := heic.DecodeConfig(probe)
+		if err != nil {
+			return nil //nolint:nilerr // unsupported/corrupt headers defer to the decoder
+		}
+		boundsErr = imagelimit.CheckDimensions(config.Width, config.Height)
+	} else {
+		boundsErr = imagelimit.CheckReader(probe)
+	}
+	if boundsErr != nil {
+		return errors.Wrapf(errThumbnailUnsupported, "thumbnail source exceeds decode bounds: %v", boundsErr)
 	}
 	return nil
 }
@@ -796,6 +913,11 @@ func (s *FileServerService) getCurrentUser(ctx context.Context, r *http.Request)
 // =============================================================================
 // Helper Functions
 // =============================================================================
+
+// isJPEGFormat reports whether a requested display format asks for JPEG.
+func isJPEGFormat(format string) bool {
+	return strings.EqualFold(format, "jpeg") || strings.EqualFold(format, "jpg")
+}
 
 // sanitizeContentType converts potentially dangerous MIME types to safe alternatives.
 func sanitizeContentType(mimeType string) string {

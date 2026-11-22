@@ -1,7 +1,7 @@
 import { lineTable, sourceRange } from "@usememos/editor";
 import { parseMemoAst, visitWithSource } from "@/lib/memo-ast";
 import type { Attachment } from "@/types/proto/api/attachment_service_pb";
-import { getAttachmentMotionGroupId, getAttachmentUrl, isImage } from "@/utils/attachment";
+import { getAttachmentDisplayUrl, getAttachmentMotionGroupId, isImage } from "@/utils/attachment";
 
 const ATTACHMENT_NAME_PREFIX = "attachments/";
 const MANAGED_ATTACHMENT_PATH_PREFIX = "/file/attachments/";
@@ -230,5 +230,5 @@ export const resolveManagedAttachmentImageSource = (source: string | undefined, 
   const uid = parseManagedAttachmentImageURL(source);
   if (!uid) return source;
   const attachment = attachments.find((candidate) => extractAttachmentUIDFromName(candidate.name) === uid);
-  return attachment ? getAttachmentUrl(attachment) : source;
+  return attachment ? getAttachmentDisplayUrl(attachment) : source;
 };
